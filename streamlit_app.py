@@ -388,10 +388,10 @@ def episode_report(spread, window_months=24):
 VIEWS = ("Curves over time", "Compare countries", "Inversion check", "US inversion history")
 
 VIEW_HINTS = {
-    VIEWS[0]: "How has one country's yield curve moved? Pick a country and the dates to compare. Darker lines are more recent.",
-    VIEWS[1]: "How do countries compare on one date? Pick the date and the countries. A higher curve means more expensive borrowing.",
-    VIEWS[2]: "Where are short-term yields above long-term yields? Red bars are inverted curves.",
-    VIEWS[3]: "Has an inverted US curve warned of recessions? Red areas are inversions; grey bands are recessions.",
+    VIEWS[0]: "One country across dates. Darker lines are more recent.",
+    VIEWS[1]: "Several countries on one date. A higher curve means more expensive borrowing.",
+    VIEWS[2]: "Red bars are curves where the short yield is above the long yield.",
+    VIEWS[3]: "Red marks US inversions. Grey bands are NBER recessions.",
 }
 
 SHAPE_NOTES = {
@@ -556,6 +556,12 @@ class DataStore:
             us = "US: built-in values (couldn't reach FRED)"
         return f"{us}  |  Other countries: built-in reference values (not live)"
 
+    def badge(self):
+        if self.us_matrix is not None:
+            origin = "" if self.us_origin == "downloaded" else " · saved copy"
+            return f"Treasuries {self.latest():%d %b %Y}{origin}"
+        return "US values are built in"
+
     def sources_line(self, codes, snap):
         live = [c for c in codes if self.is_live(c, snap)]
         parts = [f"US: Federal Reserve data via FRED for {self.us_dates[snap]:%d %b %Y}"] if live else []
@@ -564,50 +570,56 @@ class DataStore:
         return "Sources: " + "; ".join(parts) + "."
 
 
-def new_figure():
-    fig = Figure(figsize=(9.2, 5.2), dpi=120, layout="constrained")
-    return fig, fig.add_subplot()
+def new_figure(wide=True):
+    fig = Figure(figsize=(11.4, 5.15) if wide else (11.4, 6.35), dpi=120, layout="constrained")
+    fig.patch.set_facecolor("#ffffff")
+    ax = fig.add_subplot()
+    ax.set_facecolor("#ffffff")
+    return fig, ax
 
 
 def message_figure(text):
     fig, ax = new_figure()
     ax.axis("off")
-    ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=12, color="#555", transform=ax.transAxes)
+    ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=13, color="#6e6e73", transform=ax.transAxes)
     return fig
 
 
-def style_curve_axes(ax, title, newest_first=False):
+def style_curve_axes(fig, ax, title, newest_first=False):
     ax.set_xscale("log")
     ax.set_xticks(TENOR_YEARS, labels=TENORS)
     ax.xaxis.set_minor_locator(NullLocator())
     ax.set_xlim(0.2, 40)
-    ax.set_xlabel("Time to maturity (log scale)")
-    ax.set_ylabel("Yield (% per year)")
-    ax.grid(True, color="#e6e6e6")
+    ax.set_xlabel("Time to maturity")
+    ax.set_ylabel("Yield, % per year")
+    ax.grid(True, color="#efeff4", lw=0.8)
     ax.set_axisbelow(True)
+    ax.tick_params(colors="#6e6e73", labelsize=9)
+    ax.xaxis.label.set_color("#6e6e73")
+    ax.yaxis.label.set_color("#6e6e73")
+    for spine in ax.spines.values():
+        spine.set_color("#d2d2d7")
     lines = ax.get_lines()
     if lines and min(line.get_ydata().min() for line in lines) < 0:
-        ax.axhline(0, color="#555", lw=1)
+        ax.axhline(0, color="#86868b", lw=0.8)
     handles, labels = ax.get_legend_handles_labels()
     if newest_first:
         handles, labels = handles[::-1], labels[::-1]
-    ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.01, 1), borderaxespad=0)
-    ax.set_title(title, loc="left")
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="outside lower center",
+            ncol=min(len(labels), 3),
+            frameon=False,
+            fontsize=8.5,
+        )
+    ax.set_title(title, loc="left", color="#1d1d1f", fontsize=13, pad=8)
 
 
-def shape_color(shape):
-    return {"Inverted": RED, "Flat": "#a15c00"}.get(shape, "#2e7d32")
-
-
-def color_span(text, color):
-    return f'<span style="color:{color};font-weight:600">{text}</span>'
-
-
-def glossary_md():
-    lines = ["**Glossary**"]
-    for term, meaning in GLOSSARY:
-        lines.append(f"- **{term}:** {meaning}")
-    return "\n".join(lines)
+def tone(text, kind):
+    color = {"bad": "red", "good": "green", "warn": "orange"}[kind]
+    return f":{color}[{text}]"
 
 
 def view_over_time(data, name, picked):
@@ -615,7 +627,7 @@ def view_over_time(data, name, picked):
     matrix = data.matrix(code)
     picked = [d for d in DATES_LIST if d in picked]
     if not picked:
-        return message_figure("Pick at least one date to draw a curve."), [], [], ""
+        return message_figure("Pick at least one date to draw a curve."), [], [], "", []
     fig, ax = new_figure()
     cmap = matplotlib.colormaps["viridis"]
     for snap in reversed(picked):
@@ -631,7 +643,7 @@ def view_over_time(data, name, picked):
             zorder=3 if newest else 2,
             label=data.label(code, snap),
         )
-    style_curve_axes(ax, f"{name}: how the yield curve has moved", newest_first=True)
+    style_curve_axes(fig, ax, f"{name}", newest_first=True)
 
     columns = ["Date", *TENORS, "10Y\u20132Y (bp)", "Shape"]
     rows = [
@@ -646,14 +658,16 @@ def view_over_time(data, name, picked):
 
     now = matrix[picked[0]]
     shape = curve_shape(now)
+    shape_kind = {"Inverted": "bad", "Flat": "warn"}.get(shape, "good")
+    metrics = [
+        ("10-year", f"{now['10Y']:.2f}%"),
+        ("10Y – 2Y", fmt_bp(spread_bp(now))),
+        ("10Y – 3M", fmt_bp(spread_bp(now, "3M"))),
+        ("Shape", tone(shape, shape_kind)),
+    ]
     parts = [
-        f"### {name}",
+        f"**{name}**",
         f"*{data.label(code, picked[0])}*",
-        "**Key numbers**",
-        f"- 10-year yield: **{now['10Y']:.2f}%**",
-        f"- 10Y \u2013 2Y spread: **{fmt_bp(spread_bp(now))}**",
-        f"- 10Y \u2013 3M spread: **{fmt_bp(spread_bp(now, '3M'))}**",
-        f"- Curve shape: {color_span(shape, shape_color(shape))}",
         SHAPE_NOTES[shape],
     ]
     if shape != "Inverted" and now["3M"] - now["2Y"] > 0.10:
@@ -669,19 +683,19 @@ def view_over_time(data, name, picked):
         ]
     if (matrix[picked] < 0).any().any():
         parts.append(NEGATIVE_NOTE)
-    parts += [f"**About {name}**", COUNTRY_NOTES[code], f"*{data.source(code)}*", glossary_md()]
-    return fig, columns, rows, "\n\n".join(parts)
+    parts += [f"**About {name}**", COUNTRY_NOTES[code], f"*{data.source(code)}*"]
+    return fig, columns, rows, "\n\n".join(parts), metrics
 
 
 def view_countries(data, snap, names):
     names = [n for n in COUNTRIES if n in names]
     if not names:
-        return message_figure("Pick at least one country to draw a curve."), [], [], ""
+        return message_figure("Pick at least one country to draw a curve."), [], [], "", []
     curves = {n: data.matrix(COUNTRIES[n])[snap] for n in names}
     fig, ax = new_figure()
     for name, yields in curves.items():
         ax.plot(TENOR_YEARS, yields.to_numpy(), marker="o", ms=4.5, lw=2.2, color=COUNTRY_COLORS[name], label=name)
-    style_curve_axes(ax, f"Yield curves by country: {snap}")
+    style_curve_axes(fig, ax, snap)
 
     columns = ["Country", *TENORS, "10Y\u20132Y (bp)", "Shape"]
     rows = [
@@ -690,15 +704,18 @@ def view_countries(data, snap, names):
     ]
     by_10y = sorted(names, key=lambda n: curves[n]["10Y"])
     inverted = [n for n in names if curve_shape(curves[n]) == "Inverted"]
-    parts = [
-        "### Compare countries",
-        f"*As of: {snap}*",
-        "**Key numbers**",
-        f"- Highest 10-year: **{by_10y[-1]}** ({curves[by_10y[-1]]['10Y']:.2f}%)",
-        f"- Lowest 10-year: **{by_10y[0]}** ({curves[by_10y[0]]['10Y']:.2f}%)",
-        "- Inverted (10Y < 2Y): "
-        + (color_span(", ".join(inverted), RED) if inverted else color_span("none of these", "#2e7d32")),
+    metrics = [
+        ("Highest 10-year", f"{curves[by_10y[-1]]['10Y']:.2f}%"),
+        ("Lowest 10-year", f"{curves[by_10y[0]]['10Y']:.2f}%"),
+        ("Inverted", tone(str(len(inverted)) if inverted else "None", "bad" if inverted else "good")),
     ]
+    parts = [
+        "**Compare countries**",
+        f"*{snap}*",
+        f"{by_10y[-1]} is the highest 10-year yield in this set. {by_10y[0]} is the lowest.",
+    ]
+    if inverted:
+        parts.append("Inverted in this set: " + tone(", ".join(inverted), "bad"))
     peaks = sorted(((curves[n].max(), n) for n in names), reverse=True)
     if len(peaks) > 1 and peaks[0][0] > 2 * max(peaks[1][0], 1):
         parts.append(
@@ -711,9 +728,8 @@ def view_countries(data, snap, names):
         "**Why shapes differ**",
         SHAPES_NOTE,
         f"*{data.sources_line([COUNTRIES[n] for n in names], snap)}*",
-        glossary_md(),
     ]
-    return fig, columns, rows, "\n\n".join(parts)
+    return fig, columns, rows, "\n\n".join(parts), metrics
 
 
 def view_inversions(data, snap, spread_label, chosen):
@@ -725,7 +741,7 @@ def view_inversions(data, snap, spread_label, chosen):
     sizes = np.sort(np.abs(values))[::-1]
     limit = 1.3 * max(sizes[1], 50) if sizes[0] > 3 * max(sizes[1], 50) else None
     shown = np.clip(values, -limit, limit) if limit else values
-    fig, ax = new_figure()
+    fig, ax = new_figure(wide=False)
     ypos = np.arange(len(names))
     ax.barh(ypos, shown, height=0.62, color=[RED if v < 0 else BLUE for v in values])
     ax.set_yticks(ypos, labels=names)
@@ -763,13 +779,18 @@ def view_inversions(data, snap, spread_label, chosen):
     for tick in ax.get_yticklabels():
         if tick.get_text() == chosen:
             tick.set_fontweight("bold")
-    ax.legend(
+    fig.legend(
         handles=[Patch(color=RED, label="Inverted"), Patch(color=BLUE, label="Not inverted")],
-        loc="upper left",
-        bbox_to_anchor=(1.01, 1),
-        borderaxespad=0,
+        loc="outside lower center",
+        ncol=2,
+        frameon=False,
+        fontsize=8.5,
     )
-    ax.set_title(f"Which curves are inverted? 10Y \u2013 {short} spread, {snap}", loc="left")
+    ax.set_title(f"10Y \u2013 {short}  ·  {snap}", loc="left", color="#1d1d1f", fontsize=13, pad=8)
+    ax.tick_params(colors="#6e6e73", labelsize=8)
+    ax.xaxis.label.set_color("#6e6e73")
+    for spine in ax.spines.values():
+        spine.set_color("#d2d2d7")
 
     columns = ["Country", f"{short} (%)", "10Y (%)", f"10Y\u2013{short} (bp)", "Status"]
     rows = [
@@ -784,19 +805,18 @@ def view_inversions(data, snap, spread_label, chosen):
     ]
     inverted = [name for name, value in zip(names, values) if value < 0]
     chosen_v = values[names.index(chosen)]
-    status = "(inverted)" if chosen_v < 0 else "(not inverted)"
+    status = "Inverted" if chosen_v < 0 else "Not inverted"
+    metrics = [
+        ("Inverted curves", f"{len(inverted)} of {len(names)}"),
+        (chosen, fmt_bp(chosen_v)),
+        ("Status", tone(status, "bad" if chosen_v < 0 else "good")),
+    ]
     parts = [
-        "### Inversion check",
-        f"*As of: {snap}. Spread: 10Y \u2013 {short}*",
-        "**Key numbers**",
-        f"- Inverted: **{len(inverted)} of {len(names)} countries**",
+        "**Inversion check**",
+        f"*As of {snap}. Spread is 10Y \u2013 {short}.*",
     ]
     if inverted:
-        parts.append(color_span(", ".join(inverted), RED))
-    parts.append(
-        f"- {chosen}: **{fmt_bp(chosen_v)}** "
-        + color_span(status, RED if chosen_v < 0 else "#2e7d32")
-    )
+        parts.append(tone(", ".join(inverted), "bad"))
     if limit:
         off = ", ".join(f"{n} ({fmt_bp(v)})" for n, v in zip(names, values) if abs(v) > limit)
         parts.append(f"*Off the scale: {off}. Its bar is cut short so the others stay readable.*")
@@ -810,9 +830,8 @@ def view_inversions(data, snap, spread_label, chosen):
         "**10Y \u2013 2Y or 10Y \u2013 3M?**",
         SPREAD_CHOICE_NOTE,
         f"*{data.sources_line(list(COUNTRIES.values()), snap)}*",
-        glossary_md(),
     ]
-    return fig, columns, rows, "\n\n".join(parts)
+    return fig, columns, rows, "\n\n".join(parts), metrics
 
 
 def view_history(data, spread_label):
@@ -820,10 +839,14 @@ def view_history(data, spread_label):
     hist = data.us_hist
     if hist is None:
         msg = "This view needs the Federal Reserve's US Treasury history from FRED. Check the connection and reload."
-        return message_figure(msg), [], [], f"### US inversion history\n\n{msg}\n\n{glossary_md()}"
+        return message_figure(msg), [], [], f"**US inversion history**\n\n{msg}", []
     spread = ((hist["10Y"] - hist[short]) * 100).dropna()
     x, values = spread.index, spread.to_numpy()
     fig, ax = new_figure()
+    ax.tick_params(colors="#6e6e73", labelsize=9)
+    ax.yaxis.label.set_color("#6e6e73")
+    for spine in ax.spines.values():
+        spine.set_color("#d2d2d7")
     for peak, trough in recession_periods():
         if trough >= x[0]:
             ax.axvspan(max(peak, x[0]), trough, color=GREY, alpha=0.35, lw=0, zorder=0)
@@ -843,23 +866,25 @@ def view_history(data, spread_label):
         ],
         loc="outside lower center",
         ncols=3,
+        frameon=False,
+        fontsize=8.5,
     )
-    ax.set_title(f"United States: 10Y \u2013 {short} spread since {x[0]:%Y}", loc="left")
+    ax.set_title(f"United States · 10Y \u2013 {short} since {x[0]:%Y}", loc="left", color="#1d1d1f", fontsize=13, pad=8)
 
     rows, stats = episode_report(spread)
     episodes = inversion_episodes(spread)
-    parts = [
-        "### US inversion history",
-        f"*10Y \u2013 {short} spread, daily, {x[0]:%b %Y} to {x[-1]:%b %Y}. Federal Reserve data via FRED.*",
-        "**Right now**",
-        f"- Latest ({x[-1]:%d %b %Y}): **{fmt_bp(values[-1])}**",
+    inverted_now = bool(episodes and episodes[-1][1] == x[-1])
+    metrics = [
+        ("Latest spread", fmt_bp(values[-1])),
+        ("As of", f"{x[-1]:%d %b %Y}"),
+        ("Status", tone(f"Since {episodes[-1][0]:%b %Y}" if inverted_now else "Not inverted", "bad" if inverted_now else "good")),
     ]
-    if episodes and episodes[-1][1] == x[-1]:
-        parts.append(color_span(f"Inverted since {episodes[-1][0]:%d %b %Y}", RED))
-    else:
-        parts.append(color_span("Not inverted", "#2e7d32"))
-        if episodes:
-            parts.append(f"- Last inversion ended {episodes[-1][1]:%d %b %Y}")
+    parts = [
+        "**US inversion history**",
+        f"*10Y \u2013 {short}, daily, {x[0]:%b %Y} to {x[-1]:%b %Y}. Federal Reserve via FRED.*",
+    ]
+    if not inverted_now and episodes:
+        parts.append(f"Last inversion ended {episodes[-1][1]:%d %b %Y}.")
     parts += [
         "**Track record in this data**",
         f"{stats['preceded']} of {stats['recessions']} recessions were preceded by an inversion in the 2 years before they began.",
@@ -879,10 +904,9 @@ def view_history(data, spread_label):
         "**Why it can mislead**",
         MISLEAD_NOTE,
         "*The table lists every episode, newest first. Inverted days less than 3 months apart count as one episode. Recession dates are from the NBER.*",
-        glossary_md(),
     ]
     columns = ["Inversion began", "Ended", "Months", "Deepest (bp)", "Recession began", "Months later"]
-    return fig, columns, rows, "\n\n".join(parts)
+    return fig, columns, rows, "\n\n".join(parts), metrics
 
 
 def export_records(data):
@@ -936,12 +960,104 @@ def fig_png(fig):
     return buffer.getvalue()
 
 
-def main():
-    st.set_page_config(page_title="Yield Curve Explorer", layout="wide")
-    data = load_store()
+VIEW_LABELS = {
+    VIEWS[0]: "Over time",
+    VIEWS[1]: "Countries",
+    VIEWS[2]: "Inversions",
+    VIEWS[3]: "US history",
+}
 
-    st.title("Yield Curve Explorer")
-    view = st.radio("View", VIEWS, horizontal=True, label_visibility="collapsed")
+FIT_CSS = """
+<style>
+.stApp, [data-testid="stAppViewContainer"], section.main {
+  height: 100dvh;
+  overflow: hidden;
+}
+[data-testid="stMainBlockContainer"], .block-container {
+  height: 100dvh;
+  max-width: 100% !important;
+  padding: 0.7rem 1.15rem 0.45rem 1.15rem !important;
+  overflow: hidden;
+}
+[data-testid="stMainBlockContainer"] > div,
+.block-container > div {
+  height: 100%;
+  min-height: 0;
+}
+.st-key-stage {
+  height: calc(100dvh - 188px);
+  min-height: 280px;
+}
+.st-key-stage [data-testid="stHorizontalBlock"] {
+  height: 100%;
+  align-items: stretch;
+}
+.st-key-chart, .st-key-notes {
+  height: calc(100dvh - 228px) !important;
+  max-height: calc(100dvh - 228px) !important;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: #ffffff;
+}
+.st-key-chart img {
+  width: 100% !important;
+  height: auto !important;
+  max-height: calc(100dvh - 430px);
+  object-fit: contain;
+  object-position: center top;
+}
+header[data-testid="stHeader"] { height: 0; }
+@media (max-width: 820px) {
+  .stApp, [data-testid="stAppViewContainer"], section.main,
+  [data-testid="stMainBlockContainer"], .block-container,
+  [data-testid="stMainBlockContainer"] > div, .block-container > div {
+    height: auto !important;
+    max-height: none !important;
+    overflow: auto !important;
+  }
+  .st-key-stage, .st-key-chart, .st-key-notes {
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  .st-key-chart img { max-height: 68dvh; }
+}
+</style>
+"""
+
+
+def render_panel(info, metrics):
+    if metrics:
+        with st.container(horizontal=True, gap="xsmall"):
+            for label, value in metrics:
+                st.metric(label, value, border=True)
+    if info:
+        st.markdown(info)
+    with st.expander("Glossary", icon=":material/menu_book:"):
+        for term, meaning in GLOSSARY:
+            st.markdown(f"**{term}.** {meaning}")
+
+
+def main():
+    st.set_page_config(
+        page_title="Yield curves",
+        page_icon=":material/show_chart:",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+    st.html(FIT_CSS)
+    data = load_store()
+    header_slot = st.empty()
+
+    view = st.segmented_control(
+        "View",
+        VIEWS,
+        default=VIEWS[0],
+        required=True,
+        format_func=VIEW_LABELS.get,
+        label_visibility="collapsed",
+        width="content",
+    )
     st.caption(VIEW_HINTS[view])
 
     country = "United States"
@@ -950,55 +1066,99 @@ def main():
     picked_countries = list(DEFAULT_COUNTRIES)
     spread_label = next(iter(SPREADS))
 
-    if view == VIEWS[0]:
-        left, right = st.columns([1, 3])
-        country = left.selectbox("Country", list(COUNTRIES))
-        picked_dates = right.multiselect("Dates", DATES_LIST, default=DATES_LIST)
-    elif view == VIEWS[1]:
-        left, right = st.columns([1, 3])
-        asof = left.selectbox("As of", DATES_LIST)
-        picked_countries = right.multiselect("Countries", list(COUNTRIES), default=DEFAULT_COUNTRIES)
-    elif view == VIEWS[2]:
-        c1, c2, c3 = st.columns(3)
-        country = c1.selectbox("Highlight", list(COUNTRIES))
-        asof = c2.selectbox("As of", DATES_LIST, key="inv_asof")
-        spread_label = c3.selectbox("Spread", list(SPREADS))
-    else:
-        spread_label = st.selectbox("Spread", list(SPREADS), key="hist_spread")
+    with st.container(horizontal=True, vertical_alignment="bottom", gap="small"):
+        if view == VIEWS[0]:
+            country = st.selectbox("Country", list(COUNTRIES), width=220)
+            picked_dates = st.pills(
+                "Dates",
+                DATES_LIST,
+                default=DATES_LIST,
+                selection_mode="multi",
+                width="content",
+                wrap=True,
+            )
+        elif view == VIEWS[1]:
+            asof = st.selectbox("As of", DATES_LIST, width=200)
+            chosen_n = len(st.session_state.get("picked_countries", DEFAULT_COUNTRIES))
+            with st.popover(f"Countries · {chosen_n}", icon=":material/public:", width=240):
+                picked_countries = st.multiselect(
+                    "Countries",
+                    list(COUNTRIES),
+                    default=DEFAULT_COUNTRIES,
+                    key="picked_countries",
+                    label_visibility="collapsed",
+                    width="stretch",
+                )
+        elif view == VIEWS[2]:
+            country = st.selectbox("Highlight", list(COUNTRIES), width=220)
+            asof = st.selectbox("As of", DATES_LIST, key="inv_asof", width=200)
+            spread_label = st.segmented_control(
+                "Spread",
+                list(SPREADS),
+                default=next(iter(SPREADS)),
+                required=True,
+                label_visibility="collapsed",
+                key="spread_choice",
+                width="content",
+            )
+        else:
+            spread_label = st.segmented_control(
+                "Spread",
+                list(SPREADS),
+                default=next(iter(SPREADS)),
+                required=True,
+                label_visibility="collapsed",
+                key="hist_spread",
+                width="content",
+            )
 
     if view == VIEWS[0]:
-        fig, columns, rows, info = view_over_time(data, country, picked_dates)
+        fig, columns, rows, info, metrics = view_over_time(data, country, picked_dates or [])
     elif view == VIEWS[1]:
-        fig, columns, rows, info = view_countries(data, asof, picked_countries)
+        fig, columns, rows, info, metrics = view_countries(data, asof, picked_countries)
     elif view == VIEWS[2]:
-        fig, columns, rows, info = view_inversions(data, asof, spread_label, country)
+        fig, columns, rows, info, metrics = view_inversions(data, asof, spread_label, country)
     else:
-        fig, columns, rows, info = view_history(data, spread_label)
+        fig, columns, rows, info, metrics = view_history(data, spread_label)
 
-    chart_col, info_col = st.columns([3, 1.15], gap="large")
-    with chart_col:
-        st.pyplot(fig, clear_figure=False)
-        png_col, csv_col = st.columns(2)
-        png_col.download_button(
-            "Save chart (PNG)",
-            data=fig_png(fig),
-            file_name="yield_curve_chart.png",
-            mime="image/png",
-            use_container_width=True,
-        )
-        csv_col.download_button(
-            "Export data (CSV)",
-            data=export_records(data).to_csv(index=False).encode(),
-            file_name="global_yield_curves.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        if columns:
-            st.dataframe(pd.DataFrame(rows, columns=columns), hide_index=True, use_container_width=True)
-    with info_col:
-        st.markdown(info, unsafe_allow_html=True)
+    chart_png = fig_png(fig)
+    with header_slot.container(horizontal=True, vertical_alignment="center", horizontal_alignment="distribute"):
+        with st.container(horizontal=True, vertical_alignment="center", gap="small", width="content"):
+            st.header("Yield curves", icon=":material/show_chart:")
+            st.badge(data.badge(), color="blue", icon=":material/account_balance:")
+        with st.container(horizontal=True, gap="xsmall", width="content"):
+            st.download_button(
+                "Chart",
+                data=chart_png,
+                file_name="yield_curve_chart.png",
+                mime="image/png",
+                icon=":material/download:",
+                width="content",
+            )
+            st.download_button(
+                "Data",
+                data=export_records(data).to_csv(index=False).encode(),
+                file_name="global_yield_curves.csv",
+                mime="text/csv",
+                icon=":material/table:",
+                width="content",
+            )
 
-    st.caption(data.status())
+    with st.container(key="stage"):
+        chart_col, notes_col = st.columns([2.45, 1], gap="small")
+        with chart_col:
+            with st.container(border=True, key="chart"):
+                st.pyplot(fig, width="stretch")
+                if columns:
+                    st.dataframe(
+                        pd.DataFrame(rows, columns=columns),
+                        hide_index=True,
+                        height=148,
+                        width="stretch",
+                    )
+        with notes_col:
+            with st.container(border=True, key="notes"):
+                render_panel(info, metrics)
 
 
 if __name__ == "__main__":

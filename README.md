@@ -11,6 +11,8 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
+Live app: [yieldcurvebycountry.streamlit.app](https://yieldcurvebycountry.streamlit.app/)
+
 ## Publish at yieldcurve.streamlit.app
 
 The GitHub repo is the source. Streamlit Community Cloud assigns the public URL when the app is deployed, and the subdomain is chosen in that form.
